@@ -24,7 +24,8 @@ use Symfony\Component\Console\Input\InputInterface,
     Symfony\Component\Console\Input\InputArgument,
     Symfony\Component\Console\Input\InputOption,
     Doctrine\ORM\Tools\SchemaTool,
-    Doctrine\DBAL\Migrations\Configuration\Configuration;
+    Doctrine\DBAL\Migrations\Configuration\Configuration,
+	Doctrine\DBAL\Connection;
 
 /**
  * Command for generate migration classes by comparing your current database schema
@@ -44,6 +45,7 @@ class DiffCommand extends GenerateCommand
         $this
             ->setName('migrations:diff')
             ->setDescription('Generate a migration by comparing your current database to your mapping information.')
+			->addOption("database", "d", InputOption::VALUE_IS_ARRAY | InputOption::VALUE_REQUIRED)
             ->setHelp(<<<EOT
 The <info>%command.name%</info> command generates a migration by comparing your current database to your mapping information:
 
@@ -60,58 +62,67 @@ EOT
     public function execute(InputInterface $input, OutputInterface $output)
     {
         $configuration = $this->getMigrationConfiguration($input, $output);
+		$databases = $input->getOption("database");
 
         $em = $this->getHelper('em')->getEntityManager();
-        $conn = $em->getConnection();
-        $platform = $conn->getDatabasePlatform();
-        $metadata = $em->getMetadataFactory()->getAllMetadata();
 
-        if (empty($metadata)) {
-            $output->writeln('No mapping information to process.', 'ERROR');
-            return;
-        }
+		$up = "";
+		$down = "";
 
-        if ($filterExpr = $input->getOption('filter-expression')) {
-            $conn->getConfiguration()
-                ->setFilterSchemaAssetsExpression($filterExpr);
-        }
-        
-        $tool = new SchemaTool($em);
+		foreach($em->getConfiguration()->getConnections() as $connection)
+		{
+			if(!in_array($connection->getDatabase(), $databases))
+				continue;
 
-        $fromSchema = $conn->getSchemaManager()->createSchema();
-        $toSchema = $tool->getSchemaFromMetadata($metadata);
+			$output->writeln('Processing database <info>' .$connection->getDatabase(). '</info>');
 
-        //Not using value from options, because filters can be set from config.yml
-        if ($filterExpr = $conn->getConfiguration()->getFilterSchemaAssetsExpression()) {
-            $tableNames = $toSchema->getTableNames();
-            foreach ($tableNames as $tableName) {
-                $tableName = substr($tableName, strpos($tableName, '.') + 1);
-                if (!preg_match($filterExpr, $tableName)) {
-                    $toSchema->dropTable($tableName);
-                }
-            }
-        }
+			// hacked this to change entityManager connection
+			$entityManager = new \ReflectionClass(get_class($em));
+			$entityManager = $entityManager->getParentClass();
 
-        $up = $this->buildCodeFromSql($configuration, $fromSchema->getMigrateToSql($toSchema, $platform));
-        $down = $this->buildCodeFromSql($configuration, $fromSchema->getMigrateFromSql($toSchema, $platform));
+			$property = $entityManager->getProperty('conn');
 
-        if ( ! $up && ! $down) {
-            $output->writeln('No changes detected in your mapping information.', 'ERROR');
-            return;
-        }
+			$property->setAccessible(true);
+			$property->setValue($em, $connection);
 
-        $version = date('YmdHis');
-        $path = $this->generateMigration($configuration, $input, $version, $up, $down);
 
-        $output->writeln(sprintf('Generated new migration class to "<info>%s</info>" from schema differences.', $path));
+			$metadata = $em->getMetadataFactory()->getMetadataForConnection($connection);
+
+			$conn = $connection;
+			$platform = $conn->getDatabasePlatform();
+
+			if (empty($metadata)) {
+				$output->writeln('No mapping information to process.', 'ERROR');
+				return;
+			}
+
+			$tool = new SchemaTool($em);
+
+			$fromSchema = $conn->getSchemaManager()->createSchema();
+			$toSchema = $tool->getSchemaFromMetadata($metadata);
+
+			$up .= $this->buildCodeFromSql($conn, $configuration, $fromSchema->getMigrateToSql($toSchema, $platform));
+			$down .= $this->buildCodeFromSql($conn, $configuration, $fromSchema->getMigrateFromSql($toSchema, $platform));
+
+			unset($entityManager);
+
+		}
+
+		if (empty($up) && empty($down)) {
+			$output->writeln('No changes detected in your mapping information.', 'ERROR');
+			return;
+		}
+
+		$version = date('YmdHis');
+		$path = $this->generateMigration($configuration, $input, $version, $up, $down);
+
+		$output->writeln(sprintf('Generated new migration class to "<info>%s</info>" from schema differences.', $path));
     }
 
-    private function buildCodeFromSql(Configuration $configuration, array $sql)
+    private function buildCodeFromSql(Connection $connection, Configuration $configuration, array $sql)
     {
-        $currentPlatform = $configuration->getConnection()->getDatabasePlatform()->getName();
-        $code = array(
-            "\$this->abortIf(\$this->connection->getDatabasePlatform()->getName() != \"$currentPlatform\");", "",
-        );
+		$code = array();
+
         foreach ($sql as $query) {
             if (strpos($query, $configuration->getMigrationsTableName()) !== false) {
                 continue;
