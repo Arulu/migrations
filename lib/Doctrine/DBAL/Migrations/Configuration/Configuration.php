@@ -103,7 +103,7 @@ class Configuration
      */
     public function __construct(Connection $connection, OutputWriter $outputWriter = null)
     {
-        $this->connection = $connection;
+        $this->connection = $connection->getMasterConnection() ?: $connection;
         if ($outputWriter === null) {
             $outputWriter = new OutputWriter();
         }
