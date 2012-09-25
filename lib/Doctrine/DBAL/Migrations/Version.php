@@ -108,7 +108,7 @@ class Version
         $this->configuration = $configuration;
         $this->outputWriter = $configuration->getOutputWriter();
         $this->class = $class;
-        $this->connection = $configuration->getConnection();
+		$this->connection = $configuration->getConnection()->getMasterConnection() ?: $configuration->getConnection();
         $this->sm = $this->connection->getSchemaManager();
         $this->platform = $this->connection->getDatabasePlatform();
         $this->migration = new $class($this);
